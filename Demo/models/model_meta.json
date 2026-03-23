@@ -1,0 +1,34 @@
+{
+  "model_type": "xgboost",
+  "features": [
+    "temp",
+    "atemp",
+    "hum",
+    "windspeed",
+    "hr_sin",
+    "hr_cos",
+    "weekday_sin",
+    "weekday_cos",
+    "mnth_sin",
+    "mnth_cos",
+    "is_weekend",
+    "workingday",
+    "holiday",
+    "yr",
+    "season_1",
+    "season_2",
+    "season_3",
+    "season_4",
+    "weathersit_1",
+    "weathersit_2",
+    "weathersit_3",
+    "weathersit_4"
+  ],
+  "cut_valid_start": "2012-10-03",
+  "cut_test_start": "2012-12-02",
+  "metrics": {
+    "rmse": 62.69243979788028,
+    "mae": 41.62598476909661,
+    "r2": 0.8548101147532727
+  }
+}
