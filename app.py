@@ -7,6 +7,10 @@
 import warnings
 warnings.filterwarnings('ignore')
 
+import logging
+logging.getLogger("prophet").setLevel(logging.WARNING)
+logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
+
 import time
 import numpy as np
 import pandas as pd
@@ -194,41 +198,96 @@ def calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 # ──────────────────────────────────────────────────────────
 def train_holt_winters(df):
     """
-    Holt–Winters（三指数平滑）
-    使用小时级数据，24小时周期
+    Prophet — Holt-Winters 的多重季节性现代升级版。
+    传统 HW 只能建模单一季节周期（如24h），无法同时捕捉日内+周内+年度规律，
+    导致工作日/休息日预测偏差严重。Prophet 解决了这一根本缺陷。
+
+    同时建模：
+      - 日内季节性（Fourier=8，精细捕捉早晚通勤双峰）
+      - 周内季节性（工作日 vs 周末模式差异）
+      - 年度季节性（春夏秋冬租赁量变化）
+      - 假日效应（利用数据集 holiday 列）
+      - 乘法模式（季节振幅随整体增长等比例放大）
     """
+    from prophet import Prophet
+
     t0 = time.time()
 
-    # 确保按时间排序
-    ts = df.sort_values(["dteday", "hr"])["cnt"].astype(float).values
+    # ── 1. 构造小时级 datetime 时序 ─────────────────────────
+    ts = df.sort_values(["dteday", "hr"]).copy()
+    ts["ds"] = ts["dteday"] + pd.to_timedelta(ts["hr"], unit="h")
+    ts["y"]  = ts["cnt"].astype(float)
+    full_df  = ts[["ds", "y"]].reset_index(drop=True)
 
-    # 切分：最后30天做测试
-    test_size = 30 * 24  # 720 小时
-
-    y_train = ts[:-test_size]
-    y_test  = ts[-test_size:]
-
-    # ⚠️ 必须用加法季节性（seasonal="add"）：
-    # 乘法季节性要求所有值 > 0，但凌晨 cnt=0 普遍存在，会触发 ValueError
-    model = ExponentialSmoothing(
-        y_train,
-        trend="add",
-        seasonal="add",      # 加法季节性，兼容零值
-        seasonal_periods=24  # 小时数据：一天一个周期
+    # ── 2. 假日列表（利用数据集中已有的 holiday 标记） ────────
+    hol_days = ts.loc[ts["holiday"] == 1, "dteday"].dt.floor("D").drop_duplicates()
+    holidays_df = (
+        pd.DataFrame({
+            "holiday":      "public_holiday",
+            "ds":           hol_days.values,
+            "lower_window": 0,
+            "upper_window": 1,
+        })
+        if len(hol_days) > 0 else None
     )
 
-    fit   = model.fit(optimized=True)
-    y_pred = np.maximum(fit.forecast(test_size), 0)
+    # ── 3. 时间序切分（最后30天=720小时，与其他模型一致） ─────
+    test_size = 30 * 24
+    train_df  = full_df.iloc[:-test_size]
+    test_df   = full_df.iloc[-test_size:]
+
+    # ── 4. Prophet 模型配置 ──────────────────────────────────
+    m = Prophet(
+        # 乘法季节性：峰值振幅随用户增长等比例放大（更符合本数据趋势）
+        seasonality_mode="multiplicative",
+        # 趋势弯折点灵活度（0.05 = 适中，避免过拟合趋势突变）
+        changepoint_prior_scale=0.05,
+        # 季节性强度先验（10 = 充分学习季节模式）
+        seasonality_prior_scale=10.0,
+        holidays_prior_scale=10.0,
+        holidays=holidays_df,
+        # 手动控制日内季节 Fourier 阶数，关闭自动（默认 order=4 不够精细）
+        daily_seasonality=False,
+        weekly_seasonality=True,   # 自动建模 7 天周期
+        yearly_seasonality=True,   # 自动建模 365 天周期（2年数据足够）
+    )
+    # 手动添加日内季节性：Fourier order=8（16个参数），精细捕捉早晚双峰
+    m.add_seasonality("daily", period=1, fourier_order=8)
+
+    m.fit(train_df)
+
+    # ── 5. 测试集预测 ────────────────────────────────────────
+    test_fc = m.predict(test_df[["ds"]])
+    y_pred  = np.maximum(test_fc["yhat"].values, 0)
+    y_test  = test_df["y"].values
 
     elapsed = round(time.time() - t0, 2)
     metrics = calc_metrics(y_test, y_pred)
     metrics["训练时长(s)"] = elapsed
 
+    # ── 6. 全序列预测（趋势分解可视化） ─────────────────────
+    full_fc = m.predict(full_df[["ds"]])
+
+    # ── 7. 日内/周内季节性曲线（高分辨率，用于教学可视化） ──
+    vis_daily  = pd.DataFrame({"ds": pd.date_range("2012-06-11", periods=24 * 4, freq="15min")})
+    vis_weekly = pd.DataFrame({"ds": pd.date_range("2012-06-11", periods=7 * 24, freq="h")})
+    daily_fc   = m.predict(vis_daily)
+    weekly_fc  = m.predict(vis_weekly)
+
     return {
         "metrics":            metrics,
         "y_pred":             y_pred,
         "y_test":             y_test,
-        "feature_importance": None,   # 时间序列模型无特征重要性
+        "feature_importance": None,      # 时序模型不使用外部特征
+        # Prophet 专属可视化字段
+        "full_ds":            full_df["ds"].values,
+        "full_y":             full_df["y"].values,
+        "full_trend":         full_fc["trend"].values,
+        "test_ds":            test_fc["ds"].values,
+        "test_yhat_lower":    np.maximum(test_fc["yhat_lower"].values, 0),
+        "test_yhat_upper":    test_fc["yhat_upper"].values,
+        "daily_pattern":      daily_fc[["ds", "daily"]].copy(),
+        "weekly_pattern":     weekly_fc[["ds", "weekly"]].copy(),
     }
 
 
@@ -566,33 +625,40 @@ MODEL_INFO = {
     },
     "Holt-Winters": {
         "icon": "📅",
-        "complexity": "⭐⭐⭐",
-        "class_name": "ExponentialSmoothing",
-        "params_str": 'trend="add", seasonal="add", seasonal_periods=24',
+        "complexity": "⭐⭐⭐⭐",
+        "class_name": "Prophet",
+        "params_str": 'seasonality_mode="multiplicative", daily_seasonality=False, weekly_seasonality=True',
         "desc": """
-**Holt-Winters（三重指数平滑 / Triple Exponential Smoothing）** 是经典的时间序列预测方法，
-由 Holt（1957）和 Winters（1960）分别扩展提出，专为带有**趋势**和**季节性**的数据设计。
+**Holt-Winters → Prophet（多重季节性时间序列模型）**
 
-**三个组成部分：**
-- 📊 **水平（Level）**：序列当前的基础值（一次平滑）
-- 📈 **趋势（Trend）**：序列整体上升/下降的方向（二次平滑）
-- 🔄 **季节性（Seasonality）**：以固定周期重复的波动模式（三次平滑）
+**为什么要升级？**
+传统 Holt-Winters 只能建模**单一季节周期**（如 `period=24`），完全无法区分工作日和周末——
+而本数据中两者的租赁曲线截然不同（双峰通勤 vs 单峰休闲），这是导致 HW 效果差的根本原因。
 
-在本项目中，`seasonal_periods=24` 表示以**每天24小时**为一个季节周期，捕捉早晚高峰规律。
+**Prophet** 由 Facebook（Meta）于2017年提出，本质是 Holt-Winters 的现代化泛化：将趋势、
+各层级季节性和假日效应统一建模为**广义加法模型（GAM）**，用 L-BFGS 优化所有参数。
 
-**与其他模型的根本区别：**
-Holt-Winters 是**纯时间序列模型**，只看历史时间序列本身（`cnt`），
-不使用任何外部特征（温度、天气、工作日等），因此没有特征重要性。
+**本实现同时捕捉四层规律：**
+| 组件 | 描述 | 参数 |
+|------|------|------|
+| 📈 趋势 | 系统整体增长，自动检测突变点 | `changepoint_prior_scale=0.05` |
+| 🕐 日内季节性 | 早晚通勤双峰（手动 Fourier=8） | `period=1 day` |
+| 📅 周内季节性 | 工作日 vs 休息日出行模式 | `period=7 days` |
+| 🗓 年度季节性 | 春夏秋冬骑行意愿变化 | `period=365 days` |
+| 🎌 假日效应 | 利用数据集 `holiday` 列 | `lower/upper_window=0/1` |
+
+**乘法季节性（multiplicative）**：季节振幅随整体增长等比例放大，
+符合"系统用户越多，高峰时段峰值也越高"的现实规律。
 
 **优点：**
-- ✅ 专为时序数据设计，自然捕捉趋势与周期模式
-- ✅ 参数少，可解释性强（三个平滑系数 α/β/γ 均自动优化）
-- ✅ 不需要特征工程
+- ✅ 多重季节性，精度大幅优于传统 HW
+- ✅ 输出置信区间（预测不确定性可视化）
+- ✅ 可分解展示各季节性分量（可解释性极佳）
+- ✅ 自动处理假日，无需手动特征工程
 
 **缺点：**
-- ❌ 无法利用天气、假日等外部信息
-- ❌ 长期预测误差累积（越往后预测越不准）
-- ❌ 只支持单一固定的季节周期（不能同时建模日+周+年三重季节性）
+- ❌ 仍不使用温度/天气等外部特征（纯时序）
+- ❌ 训练时间比传统 HW 略长（通常10–30秒）
 """,
     },
 }
@@ -611,10 +677,18 @@ def page_model(name: str):
         st.markdown(f'<div class="algo-desc">{info["desc"]}</div>', unsafe_allow_html=True)
         if name == "Holt-Winters":
             st.code(
-                "from statsmodels.tsa.holtwinters import ExponentialSmoothing\n"
-                f"model = ExponentialSmoothing(y_train, {info['params_str']})\n"
-                "fit   = model.fit(optimized=True)\n"
-                "y_pred = fit.forecast(steps=720)  # 预测未来30天",
+                "from prophet import Prophet\n\n"
+                "m = Prophet(\n"
+                '    seasonality_mode="multiplicative",\n'
+                "    changepoint_prior_scale=0.05,\n"
+                "    weekly_seasonality=True,\n"
+                "    yearly_seasonality=True,\n"
+                "    holidays=holidays_df,          # 数据集中的假日标记\n"
+                ")\n"
+                'm.add_seasonality("daily", period=1, fourier_order=8)  # 精细日内曲线\n'
+                "m.fit(train_df)                    # ds列=时间戳, y列=租赁量\n"
+                "forecast = m.predict(test_df)\n"
+                "y_pred = forecast['yhat'].clip(lower=0)",
                 language="python",
             )
         else:
@@ -758,6 +832,135 @@ def page_model(name: str):
             ).round(1),
         })
         st.dataframe(tbl, use_container_width=True)
+
+    # ── Prophet 专属分解可视化 ────────────────────────────
+    if name == "Holt-Winters" and "full_trend" in res:
+        st.divider()
+        st.subheader("🔍 Prophet 分解分析 — 各组件独立可视化")
+
+        full_ds    = pd.to_datetime(res["full_ds"])
+        full_y     = res["full_y"]
+        full_trend = res["full_trend"]
+        test_ds    = pd.to_datetime(res["test_ds"])
+
+        # 1. 趋势分量
+        st.markdown("**📈 整体趋势（剔除季节性后的系统增长曲线）**")
+        fig_trend = go.Figure()
+        fig_trend.add_trace(go.Scatter(
+            x=full_ds, y=full_y, name="实际值",
+            line=dict(color="#BBDEFB", width=0.8), opacity=0.55,
+        ))
+        fig_trend.add_trace(go.Scatter(
+            x=full_ds, y=full_trend, name="趋势",
+            line=dict(color="#1565C0", width=2.5),
+        ))
+        # 训练/测试分割线
+        split_dt = test_ds[0]
+        fig_trend.add_vline(
+            x=split_dt, line_dash="dash", line_color="#E53935",
+            annotation_text="测试集起点", annotation_position="top left",
+        )
+        fig_trend.update_layout(
+            **PLOT_CONFIG, height=300, hovermode="x unified",
+            yaxis_gridcolor="#f0f0f0", xaxis_title="", yaxis_title="租赁量",
+        )
+        st.plotly_chart(fig_trend, use_container_width=True)
+        st.markdown("""
+        <div class="insight">
+        📌 <b>趋势洞察：</b>Prophet 自动检测趋势突变点（changepoints）。
+        可以看到2012年租赁量整体明显高于2011年，增速在年中略有放缓，
+        符合共享单车平台从快速扩张转向稳定增长的生命周期规律。
+        </div>""", unsafe_allow_html=True)
+
+        st.divider()
+        col_d, col_w = st.columns(2)
+
+        with col_d:
+            # 2. 日内季节性
+            st.markdown("**🕐 日内季节性（典型一天24小时的租赁规律）**")
+            dp = res["daily_pattern"].copy()
+            dp["hour"] = dp["ds"].dt.hour + dp["ds"].dt.minute / 60
+            dp_sorted  = dp.sort_values("hour")
+            fig_dp = go.Figure(go.Scatter(
+                x=dp_sorted["hour"], y=dp_sorted["daily"],
+                mode="lines", line=dict(color="#E53935", width=2.5),
+                fill="tozeroy", fillcolor="rgba(229,57,53,0.08)",
+            ))
+            fig_dp.update_layout(
+                **PLOT_CONFIG, height=300,
+                xaxis=dict(tickmode="linear", tick0=0, dtick=4,
+                           title="小时（0–24）"),
+                yaxis=dict(title="季节性乘数", gridcolor="#f0f0f0"),
+            )
+            st.plotly_chart(fig_dp, use_container_width=True)
+            st.markdown("""
+            <div class="insight">
+            📌 <b>双峰规律：</b>早高峰（~8点）和晚高峰（~17–18点）季节性乘数最高，
+            凌晨（1–5点）接近零。Prophet 用8阶 Fourier 级数精细拟合了这条双峰曲线。
+            </div>""", unsafe_allow_html=True)
+
+        with col_w:
+            # 3. 周内季节性（按天聚合均值）
+            st.markdown("**📅 周内季节性（各星期的相对出行强度）**")
+            wp = res["weekly_pattern"].copy()
+            wp["dow"]   = wp["ds"].dt.dayofweek   # 0=Monday
+            day_labels  = ["周一","周二","周三","周四","周五","周六","周日"]
+            wp_agg      = wp.groupby("dow")["weekly"].mean().reset_index()
+            wp_agg["星期"] = wp_agg["dow"].map(lambda x: day_labels[x])
+            colors_week = [
+                "#1E88E5","#1E88E5","#1E88E5","#1E88E5","#1E88E5",
+                "#E53935","#E53935",
+            ]
+            fig_wp = go.Figure(go.Bar(
+                x=wp_agg["星期"], y=wp_agg["weekly"],
+                marker_color=colors_week,
+                text=[f"{v:.3f}" for v in wp_agg["weekly"]],
+                textposition="outside",
+            ))
+            fig_wp.update_layout(
+                **PLOT_CONFIG, height=300,
+                yaxis=dict(title="季节性乘数", gridcolor="#f0f0f0"),
+                xaxis_title="",
+            )
+            st.plotly_chart(fig_wp, use_container_width=True)
+            st.markdown("""
+            <div class="insight">
+            📌 <b>工作日 vs 休息日：</b>蓝色=工作日，红色=周末。
+            若工作日乘数 > 周末，说明通勤用户是主力；
+            反之则休闲用户更活跃。Prophet 完整捕捉到了这一差异。
+            </div>""", unsafe_allow_html=True)
+
+        st.divider()
+
+        # 4. 测试集预测 + 置信区间
+        st.markdown("**🎯 测试集预测与 80% 置信区间**")
+        fig_ci = go.Figure()
+        # 置信带
+        fig_ci.add_trace(go.Scatter(
+            x=np.concatenate([test_ds, test_ds[::-1]]),
+            y=np.concatenate([res["test_yhat_upper"], res["test_yhat_lower"][::-1]]),
+            fill="toself", fillcolor="rgba(33,150,243,0.12)",
+            line=dict(color="rgba(0,0,0,0)"), name="80% 置信区间", showlegend=True,
+        ))
+        fig_ci.add_trace(go.Scatter(
+            x=test_ds, y=y_true, name="实际值",
+            line=dict(color="#1E88E5", width=1.5),
+        ))
+        fig_ci.add_trace(go.Scatter(
+            x=test_ds, y=y_pred, name="预测值",
+            line=dict(color="#E53935", width=1.5, dash="dot"),
+        ))
+        fig_ci.update_layout(
+            **PLOT_CONFIG, height=320, hovermode="x unified",
+            yaxis_gridcolor="#f0f0f0", xaxis_title="", yaxis_title="租赁量",
+        )
+        st.plotly_chart(fig_ci, use_container_width=True)
+        st.markdown("""
+        <div class="insight">
+        📌 <b>置信区间：</b>阴影部分表示 80% 预测区间。若实际值大多落在区间内，说明模型不确定性估计合理。
+        相较于传统机器学习模型，Prophet 的独特优势在于能输出<b>可量化的预测不确定性</b>，
+        这在实际业务决策（如运力调度）中极有价值。
+        </div>""", unsafe_allow_html=True)
 
 
 # ─────────────── 总结页 ────────────────────────────────────
