@@ -19,6 +19,7 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import xgboost as xgb
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 # ──────────────────────────────────────────────────────────
 # 页面配置
@@ -118,8 +119,8 @@ header[data-testid="stHeader"] { display: none; }
 # ──────────────────────────────────────────────────────────
 SEASON_MAP   = {1: "春季", 2: "夏季", 3: "秋季", 4: "冬季"}
 WEATHER_MAP  = {1: "晴天/少云", 2: "雾天/多云", 3: "小雨/小雪", 4: "大雨/大雪"}
-MODEL_NAMES  = ["线性回归", "岭回归", "随机森林", "梯度提升", "XGBoost"]
-MODEL_COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#9C27B0", "#F44336"]
+MODEL_NAMES  = ["线性回归", "岭回归", "随机森林", "梯度提升", "XGBoost", "Holt-Winters"]
+MODEL_COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#9C27B0", "#F44336", "#607D8B"]
 PLOT_CONFIG  = dict(plot_bgcolor="white", paper_bgcolor="white")
 
 # ──────────────────────────────────────────────────────────
@@ -191,6 +192,46 @@ def calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 # ──────────────────────────────────────────────────────────
 # 模型训练
 # ──────────────────────────────────────────────────────────
+def train_holt_winters(df):
+    """
+    Holt–Winters（三指数平滑）
+    使用小时级数据，24小时周期
+    """
+    t0 = time.time()
+
+    # 确保按时间排序
+    ts = df.sort_values(["dteday", "hr"])["cnt"].astype(float).values
+
+    # 切分：最后30天做测试
+    test_size = 30 * 24  # 720 小时
+
+    y_train = ts[:-test_size]
+    y_test  = ts[-test_size:]
+
+    # ⚠️ 必须用加法季节性（seasonal="add"）：
+    # 乘法季节性要求所有值 > 0，但凌晨 cnt=0 普遍存在，会触发 ValueError
+    model = ExponentialSmoothing(
+        y_train,
+        trend="add",
+        seasonal="add",      # 加法季节性，兼容零值
+        seasonal_periods=24  # 小时数据：一天一个周期
+    )
+
+    fit   = model.fit(optimized=True)
+    y_pred = np.maximum(fit.forecast(test_size), 0)
+
+    elapsed = round(time.time() - t0, 2)
+    metrics = calc_metrics(y_test, y_pred)
+    metrics["训练时长(s)"] = elapsed
+
+    return {
+        "metrics":            metrics,
+        "y_pred":             y_pred,
+        "y_test":             y_test,
+        "feature_importance": None,   # 时间序列模型无特征重要性
+    }
+
+
 def train_model(name: str, X_tr, y_tr, X_te, y_te) -> dict:
     t0 = time.time()
 
@@ -523,6 +564,37 @@ MODEL_INFO = {
 - ❌ 可解释性不如线性模型
 """,
     },
+    "Holt-Winters": {
+        "icon": "📅",
+        "complexity": "⭐⭐⭐",
+        "class_name": "ExponentialSmoothing",
+        "params_str": 'trend="add", seasonal="add", seasonal_periods=24',
+        "desc": """
+**Holt-Winters（三重指数平滑 / Triple Exponential Smoothing）** 是经典的时间序列预测方法，
+由 Holt（1957）和 Winters（1960）分别扩展提出，专为带有**趋势**和**季节性**的数据设计。
+
+**三个组成部分：**
+- 📊 **水平（Level）**：序列当前的基础值（一次平滑）
+- 📈 **趋势（Trend）**：序列整体上升/下降的方向（二次平滑）
+- 🔄 **季节性（Seasonality）**：以固定周期重复的波动模式（三次平滑）
+
+在本项目中，`seasonal_periods=24` 表示以**每天24小时**为一个季节周期，捕捉早晚高峰规律。
+
+**与其他模型的根本区别：**
+Holt-Winters 是**纯时间序列模型**，只看历史时间序列本身（`cnt`），
+不使用任何外部特征（温度、天气、工作日等），因此没有特征重要性。
+
+**优点：**
+- ✅ 专为时序数据设计，自然捕捉趋势与周期模式
+- ✅ 参数少，可解释性强（三个平滑系数 α/β/γ 均自动优化）
+- ✅ 不需要特征工程
+
+**缺点：**
+- ❌ 无法利用天气、假日等外部信息
+- ❌ 长期预测误差累积（越往后预测越不准）
+- ❌ 只支持单一固定的季节周期（不能同时建模日+周+年三重季节性）
+""",
+    },
 }
 
 
@@ -537,13 +609,22 @@ def page_model(name: str):
     # 算法介绍
     with st.expander("📚 算法介绍（点击展开/收起）", expanded=True):
         st.markdown(f'<div class="algo-desc">{info["desc"]}</div>', unsafe_allow_html=True)
-        st.code(
-            f"from sklearn... import {info['class_name']}\n"
-            f"model = {info['class_name']}({info['params_str']})\n"
-            f"model.fit(X_train, y_train)\n"
-            f"y_pred = model.predict(X_test)",
-            language="python",
-        )
+        if name == "Holt-Winters":
+            st.code(
+                "from statsmodels.tsa.holtwinters import ExponentialSmoothing\n"
+                f"model = ExponentialSmoothing(y_train, {info['params_str']})\n"
+                "fit   = model.fit(optimized=True)\n"
+                "y_pred = fit.forecast(steps=720)  # 预测未来30天",
+                language="python",
+            )
+        else:
+            st.code(
+                f"from sklearn... import {info['class_name']}\n"
+                f"model = {info['class_name']}({info['params_str']})\n"
+                f"model.fit(X_train, y_train)\n"
+                f"y_pred = model.predict(X_test)",
+                language="python",
+            )
 
     # 运行按钮
     key = f"result_{name}"
@@ -552,9 +633,12 @@ def page_model(name: str):
         run_clicked = st.button(f"▶ 运行 {name}", type="primary", use_container_width=True)
 
     if run_clicked:
-        X_tr, y_tr, X_te, y_te, _ = prepare_ml_data()
         with st.spinner(f"⏳ 正在训练 {name}，请稍候..."):
-            result = train_model(name, X_tr, y_tr, X_te, y_te)
+            if name == "Holt-Winters":
+                result = train_holt_winters(load_raw())
+            else:
+                X_tr, y_tr, X_te, y_te, _ = prepare_ml_data()
+                result = train_model(name, X_tr, y_tr, X_te, y_te)
             st.session_state[key] = result
         st.success(f"✅ {name} 训练完成！")
 
@@ -566,7 +650,7 @@ def page_model(name: str):
     metrics = res["metrics"]
     y_pred  = res["y_pred"]
     y_true  = res["y_test"]
-    fi      = res["feature_importance"]
+    fi      = res.get("feature_importance")   # Holt-Winters 返回 None
 
     st.divider()
 
@@ -627,18 +711,20 @@ def page_model(name: str):
 
     # ── 特征重要性 ────────────────────────────────────────
     st.subheader("🔑 特征重要性（Top 10）")
-    feat_df = fi.reset_index()
-    feat_df.columns = ["特征", "重要性"]
-    feat_df = feat_df.sort_values("重要性")
-
-    fig_fi = px.bar(
-        feat_df, x="重要性", y="特征", orientation="h",
-        color="重要性", color_continuous_scale="Blues",
-        labels={"重要性": "重要性分数", "特征": "特征名称"},
-    )
-    fig_fi.update_layout(**PLOT_CONFIG, height=360, showlegend=False,
-                          coloraxis_showscale=False, xaxis_gridcolor="#f0f0f0")
-    st.plotly_chart(fig_fi, use_container_width=True)
+    if fi is not None:
+        feat_df = fi.reset_index()
+        feat_df.columns = ["特征", "重要性"]
+        feat_df = feat_df.sort_values("重要性")
+        fig_fi = px.bar(
+            feat_df, x="重要性", y="特征", orientation="h",
+            color="重要性", color_continuous_scale="Blues",
+            labels={"重要性": "重要性分数", "特征": "特征名称"},
+        )
+        fig_fi.update_layout(**PLOT_CONFIG, height=360, showlegend=False,
+                              coloraxis_showscale=False, xaxis_gridcolor="#f0f0f0")
+        st.plotly_chart(fig_fi, use_container_width=True)
+    else:
+        st.info("Holt-Winters 是纯时间序列模型，直接对历史序列建模，不使用外部特征，因此无特征重要性。")
 
     # ── 残差分布 ──────────────────────────────────────────
     st.subheader("📊 残差分布（预测误差直方图）")
