@@ -73,9 +73,47 @@ header[data-testid="stHeader"] { display: none; }
     background: #fff8e1; border: 1px solid #ffd54f; border-radius: 12px;
     padding: 20px 24px; line-height: 1.9; font-size: 0.92rem;
 }
-.lang-btn {
-    display: inline-block; padding: 4px 14px; border-radius: 20px;
-    font-size: 0.82rem; font-weight: 600; cursor: pointer; margin: 2px 3px;
+
+/* ── Apple-style Segmented Control（语言切换）── */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:first-of-type {
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 12px;
+    padding: 3px !important;
+    gap: 2px !important;
+    border: 1px solid rgba(255,255,255,0.08);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
+    margin-bottom: 4px;
+}
+/* 两个 segment 按钮公共样式 */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:first-of-type button {
+    border-radius: 9px !important;
+    border: none !important;
+    background: transparent !important;
+    color: rgba(200, 220, 255, 0.55) !important;
+    font-size: 0.80rem !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.02em !important;
+    height: 32px !important;
+    padding: 0 6px !important;
+    transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease !important;
+    box-shadow: none !important;
+}
+/* 激活态：白色药丸 + 投影 */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:first-of-type [data-testid="baseButton-primary"] {
+    background: rgba(255, 255, 255, 0.93) !important;
+    color: #1a237e !important;
+    font-weight: 650 !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.28), 0 0.5px 1px rgba(0,0,0,0.12) !important;
+}
+/* 非激活态 hover */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:first-of-type [data-testid="baseButton-secondary"]:hover {
+    background: rgba(255,255,255,0.12) !important;
+    color: rgba(220, 235, 255, 0.85) !important;
+}
+/* 激活态 hover 保持白色 */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:first-of-type [data-testid="baseButton-primary"]:hover {
+    background: white !important;
+    color: #1a237e !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1022,16 +1060,24 @@ def main():
         st.session_state.model_idx = 0
 
     with st.sidebar:
-        # ── 语言切换 / Language Toggle ──
+        # ── 语言切换 / Language Toggle (Apple Segmented Control) ──
         lang_col1, lang_col2 = st.columns(2)
         with lang_col1:
-            zh_style = "background:#1565c0;color:white;" if st.session_state.lang == "zh" else "background:rgba(255,255,255,0.15);color:#cce;"
-            if st.button("🇨🇳 中文", use_container_width=True, key="btn_zh"):
+            if st.button(
+                "🇨🇳 中文",
+                use_container_width=True,
+                key="btn_zh",
+                type="primary" if st.session_state.lang == "zh" else "secondary",
+            ):
                 st.session_state.lang = "zh"
                 st.rerun()
         with lang_col2:
-            en_style = "background:#1565c0;color:white;" if st.session_state.lang == "en" else "background:rgba(255,255,255,0.15);color:#cce;"
-            if st.button("🇬🇧 English", use_container_width=True, key="btn_en"):
+            if st.button(
+                "🇬🇧 English",
+                use_container_width=True,
+                key="btn_en",
+                type="primary" if st.session_state.lang == "en" else "secondary",
+            ):
                 st.session_state.lang = "en"
                 st.rerun()
 
