@@ -7,10 +7,6 @@
 import warnings
 warnings.filterwarnings('ignore')
 
-import logging
-logging.getLogger("prophet").setLevel(logging.WARNING)
-logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
-
 import time
 import numpy as np
 import pandas as pd
@@ -23,9 +19,6 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import xgboost as xgb
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from statsmodels.tsa.seasonal import STL
-from statsmodels.tsa.forecasting.stl import STLForecast
 
 # ──────────────────────────────────────────────────────────
 # 页面配置
@@ -125,8 +118,8 @@ header[data-testid="stHeader"] { display: none; }
 # ──────────────────────────────────────────────────────────
 SEASON_MAP   = {1: "春季", 2: "夏季", 3: "秋季", 4: "冬季"}
 WEATHER_MAP  = {1: "晴天/少云", 2: "雾天/多云", 3: "小雨/小雪", 4: "大雨/大雪"}
-MODEL_NAMES  = ["线性回归", "岭回归", "随机森林", "梯度提升", "XGBoost", "Holt-Winters"]
-MODEL_COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#9C27B0", "#F44336", "#607D8B"]
+MODEL_NAMES  = ["线性回归", "岭回归", "随机森林", "梯度提升", "XGBoost"]
+MODEL_COLORS = ["#2196F3", "#4CAF50", "#FF9800", "#9C27B0", "#F44336"]
 PLOT_CONFIG  = dict(plot_bgcolor="white", paper_bgcolor="white")
 
 # ──────────────────────────────────────────────────────────
@@ -198,79 +191,6 @@ def calc_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 # ──────────────────────────────────────────────────────────
 # 模型训练
 # ──────────────────────────────────────────────────────────
-def train_holt_winters(df):
-    """
-    STLForecast — STL 多重季节分解 + 指数平滑预测。
-
-    原始 HW(period=24) 只看日内周期，完全忽略工作日/休息日差异。
-    本方案用 period=168（一周168小时）做 STL 分解，一次性捕捉日内+周内两层规律，
-    再对去季节化序列做带阻尼趋势的指数平滑预测，无需任何额外依赖。
-    """
-    t0 = time.time()
-
-    # ── 1. 构造时序数组与时间戳 ──────────────────────────────
-    ts_df = df.sort_values(["dteday", "hr"]).copy()
-    ts_df["ds"] = ts_df["dteday"] + pd.to_timedelta(ts_df["hr"], unit="h")
-    all_vals = ts_df["cnt"].astype(float).values
-    all_ds   = ts_df["ds"].values
-
-    # ── 2. 切分（最后30天=720小时，与其他模型一致） ───────────
-    test_size = 30 * 24
-    y_train   = all_vals[:-test_size]
-    y_test    = all_vals[-test_size:]
-    train_ds  = all_ds[:-test_size]
-    test_ds   = all_ds[-test_size:]
-
-    # ── 3. STL 分解（仅训练集，用于可视化） ──────────────────
-    #   period=168：一周168小时，同时编码日内+周内两层季节性
-    #   robust=True：对凌晨零值和假日异常点鲁棒
-    stl_res = STL(y_train, period=168, robust=True).fit()
-
-    # ── 4. STLForecast = STL去季节化 + 指数平滑预测 ──────────
-    #   ETS 只需建模趋势（季节性已由 STL 提取）
-    #   damped_trend=True：长期预测趋势衰减，防止外推过度乐观
-    stlf = STLForecast(
-        y_train,
-        ExponentialSmoothing,
-        model_kwargs={
-            "trend":                 "add",
-            "damped_trend":          True,
-            "initialization_method": "estimated",
-        },
-        period=168,
-        robust=True,
-    )
-    fit_res = stlf.fit(fit_kwargs={"optimized": True})
-    y_pred  = np.maximum(fit_res.forecast(test_size), 0)
-
-    elapsed = round(time.time() - t0, 2)
-    metrics = calc_metrics(y_test, y_pred)
-    metrics["训练时长(s)"] = elapsed
-
-    # ── 5. 提取日内/周内季节性均值（教学可视化） ─────────────
-    seasonal = stl_res.seasonal
-    n_weeks  = len(seasonal) // 168
-    seg      = seasonal[: n_weeks * 168].reshape(n_weeks, 168)
-    avg_week = seg.mean(axis=0)              # 168 个点：一周平均季节效应
-    avg_day  = avg_week.reshape(7, 24).mean(axis=0)   # 24 个点：一天平均
-
-    return {
-        "metrics":            metrics,
-        "y_pred":             y_pred,
-        "y_test":             y_test,
-        "feature_importance": None,
-        # STL 分解数据（可视化用）
-        "train_ds":           train_ds,
-        "test_ds":            test_ds,
-        "y_train":            y_train,
-        "stl_trend":          stl_res.trend,
-        "stl_seasonal":       stl_res.seasonal,
-        "stl_resid":          stl_res.resid,
-        "avg_day":            avg_day,
-        "avg_week":           avg_week,
-    }
-
-
 def train_model(name: str, X_tr, y_tr, X_te, y_te) -> dict:
     t0 = time.time()
 
@@ -603,54 +523,6 @@ MODEL_INFO = {
 - ❌ 可解释性不如线性模型
 """,
     },
-    "Holt-Winters": {
-        "icon": "📅",
-        "complexity": "⭐⭐⭐",
-        "class_name": "STLForecast",
-        "params_str": "period=168, robust=True",
-        "desc": """
-**STLForecast — STL 多重季节分解 + 指数平滑（Holt-Winters 的升级方案）**
-
-**为什么原来效果差？**
-传统 Holt-Winters 只能建模**单一季节周期**（如 `period=24`），它眼中的每个周一和周六毫无差别。
-但本数据中工作日（通勤双峰）和休息日（休闲单峰）的曲线形态截然不同，这层信息完全丢失。
-
-**STL（Seasonal-Trend decomposition using LOESS）** 是经典的时序分解算法，
-将序列拆分为 **趋势 + 季节 + 残差** 三部分，分别处理再重组，比 HW 更灵活。
-
-**本实现的两步流程：**
-
-```
-原始时序(17379h)
-    ↓ STL分解(period=168, 一周168小时)
-┌─────────┬──────────────┬────────┐
-│  趋势   │  季节性(周级) │  残差  │
-└────┬────┴──────────────┴────────┘
-     ↓ 指数平滑(ETS + 阻尼趋势)预测
-    预测趋势
-     ↓ 叠加STL推断的未来季节性
-    最终预测值
-```
-
-**`period=168` 的核心价值：**
-168 = 7天 × 24小时，STL 提取完整的周级季节分量，其中天然包含了每天的小时规律，
-一次操作同时解决日内 + 周内两层季节性。
-
-**`robust=True`：** 使用鲁棒加权 LOESS 拟合，对凌晨零值和假日异常点有更强抵抗力。
-
-**`damped_trend=True`：** 长期预测时趋势逐渐衰减（而非线性外推），防止预测过度乐观。
-
-**优点：**
-- ✅ 同时捕捉日内+周内两层季节性，大幅优于单层 HW
-- ✅ 纯 statsmodels 实现，无额外依赖
-- ✅ 分解结果可直接可视化（趋势/季节/残差三分量图）
-- ✅ 对异常值鲁棒（`robust=True`）
-
-**缺点：**
-- ❌ 不使用温度/天气等外部特征（纯时序）
-- ❌ 不建模年度季节性（数据仅2年，样本不足）
-""",
-    },
 }
 
 
@@ -665,32 +537,13 @@ def page_model(name: str):
     # 算法介绍
     with st.expander("📚 算法介绍（点击展开/收起）", expanded=True):
         st.markdown(f'<div class="algo-desc">{info["desc"]}</div>', unsafe_allow_html=True)
-        if name == "Holt-Winters":
-            st.code(
-                "from statsmodels.tsa.seasonal import STL\n"
-                "from statsmodels.tsa.forecasting.stl import STLForecast\n"
-                "from statsmodels.tsa.holtwinters import ExponentialSmoothing\n\n"
-                "# period=168：一周168小时，同时捕捉日内+周内季节性\n"
-                "stlf = STLForecast(\n"
-                "    y_train,\n"
-                "    ExponentialSmoothing,\n"
-                '    model_kwargs={"trend": "add", "damped_trend": True,\n'
-                '                  "initialization_method": "estimated"},\n'
-                "    period=168,\n"
-                "    robust=True,   # 对凌晨零值和假日异常鲁棒\n"
-                ")\n"
-                "fit = stlf.fit(fit_kwargs={'optimized': True})\n"
-                "y_pred = fit.forecast(720).clip(min=0)  # 预测30天=720小时",
-                language="python",
-            )
-        else:
-            st.code(
-                f"from sklearn... import {info['class_name']}\n"
-                f"model = {info['class_name']}({info['params_str']})\n"
-                f"model.fit(X_train, y_train)\n"
-                f"y_pred = model.predict(X_test)",
-                language="python",
-            )
+        st.code(
+            f"from sklearn... import {info['class_name']}\n"
+            f"model = {info['class_name']}({info['params_str']})\n"
+            f"model.fit(X_train, y_train)\n"
+            f"y_pred = model.predict(X_test)",
+            language="python",
+        )
 
     # 运行按钮
     key = f"result_{name}"
@@ -699,12 +552,9 @@ def page_model(name: str):
         run_clicked = st.button(f"▶ 运行 {name}", type="primary", use_container_width=True)
 
     if run_clicked:
+        X_tr, y_tr, X_te, y_te, _ = prepare_ml_data()
         with st.spinner(f"⏳ 正在训练 {name}，请稍候..."):
-            if name == "Holt-Winters":
-                result = train_holt_winters(load_raw())
-            else:
-                X_tr, y_tr, X_te, y_te, _ = prepare_ml_data()
-                result = train_model(name, X_tr, y_tr, X_te, y_te)
+            result = train_model(name, X_tr, y_tr, X_te, y_te)
             st.session_state[key] = result
         st.success(f"✅ {name} 训练完成！")
 
@@ -716,7 +566,7 @@ def page_model(name: str):
     metrics = res["metrics"]
     y_pred  = res["y_pred"]
     y_true  = res["y_test"]
-    fi      = res.get("feature_importance")   # Holt-Winters 返回 None
+    fi      = res["feature_importance"]
 
     st.divider()
 
@@ -777,20 +627,18 @@ def page_model(name: str):
 
     # ── 特征重要性 ────────────────────────────────────────
     st.subheader("🔑 特征重要性（Top 10）")
-    if fi is not None:
-        feat_df = fi.reset_index()
-        feat_df.columns = ["特征", "重要性"]
-        feat_df = feat_df.sort_values("重要性")
-        fig_fi = px.bar(
-            feat_df, x="重要性", y="特征", orientation="h",
-            color="重要性", color_continuous_scale="Blues",
-            labels={"重要性": "重要性分数", "特征": "特征名称"},
-        )
-        fig_fi.update_layout(**PLOT_CONFIG, height=360, showlegend=False,
-                              coloraxis_showscale=False, xaxis_gridcolor="#f0f0f0")
-        st.plotly_chart(fig_fi, use_container_width=True)
-    else:
-        st.info("Holt-Winters 是纯时间序列模型，直接对历史序列建模，不使用外部特征，因此无特征重要性。")
+    feat_df = fi.reset_index()
+    feat_df.columns = ["特征", "重要性"]
+    feat_df = feat_df.sort_values("重要性")
+
+    fig_fi = px.bar(
+        feat_df, x="重要性", y="特征", orientation="h",
+        color="重要性", color_continuous_scale="Blues",
+        labels={"重要性": "重要性分数", "特征": "特征名称"},
+    )
+    fig_fi.update_layout(**PLOT_CONFIG, height=360, showlegend=False,
+                          coloraxis_showscale=False, xaxis_gridcolor="#f0f0f0")
+    st.plotly_chart(fig_fi, use_container_width=True)
 
     # ── 残差分布 ──────────────────────────────────────────
     st.subheader("📊 残差分布（预测误差直方图）")
@@ -824,117 +672,6 @@ def page_model(name: str):
             ).round(1),
         })
         st.dataframe(tbl, use_container_width=True)
-
-    # ── STL 专属分解可视化 ───────────────────────────────
-    if name == "Holt-Winters" and "stl_trend" in res:
-        st.divider()
-        st.subheader("🔍 STL 时序分解分析")
-
-        train_ds = pd.to_datetime(res["train_ds"])
-        test_ds  = pd.to_datetime(res["test_ds"])
-
-        # 1. STL 三分量图（趋势 / 季节性 / 残差）
-        st.markdown("**📊 STL 三分量分解（训练集）**")
-        fig_stl = make_subplots(
-            rows=3, cols=1, shared_xaxes=True,
-            subplot_titles=["趋势分量（Trend）", "季节性分量（Seasonal, period=168h）", "残差（Residual）"],
-            vertical_spacing=0.08,
-        )
-        fig_stl.add_trace(
-            go.Scatter(x=train_ds, y=res["stl_trend"],
-                       line=dict(color="#1565C0", width=1.2), name="趋势"),
-            row=1, col=1,
-        )
-        fig_stl.add_trace(
-            go.Scatter(x=train_ds, y=res["stl_seasonal"],
-                       line=dict(color="#E53935", width=0.6), name="季节性"),
-            row=2, col=1,
-        )
-        fig_stl.add_trace(
-            go.Scatter(x=train_ds, y=res["stl_resid"],
-                       line=dict(color="#43A047", width=0.6), name="残差"),
-            row=3, col=1,
-        )
-        fig_stl.update_layout(
-            **PLOT_CONFIG, height=520, showlegend=False,
-            yaxis_gridcolor="#f0f0f0", yaxis2_gridcolor="#f0f0f0", yaxis3_gridcolor="#f0f0f0",
-        )
-        st.plotly_chart(fig_stl, use_container_width=True)
-        st.markdown("""
-        <div class="insight">
-        📌 <b>分解洞察：</b>STL 将原始时序拆解为三个独立分量。
-        <b>趋势</b>反映2011→2012年整体增长；<b>季节性</b>包含168小时（一周）的重复模式，
-        日内双峰和工作日/休息日差异都在其中；<b>残差</b>是扣除趋势和季节后剩余的随机扰动。
-        </div>""", unsafe_allow_html=True)
-
-        st.divider()
-        col_d, col_w = st.columns(2)
-
-        # 2. 日内平均季节性
-        with col_d:
-            st.markdown("**🕐 日内平均季节效应（24小时）**")
-            avg_day = res["avg_day"]
-            fig_day = go.Figure(go.Scatter(
-                x=list(range(24)), y=avg_day,
-                mode="lines+markers",
-                line=dict(color="#E53935", width=2.5),
-                fill="tozeroy", fillcolor="rgba(229,57,53,0.08)",
-                marker=dict(size=5),
-            ))
-            fig_day.update_layout(
-                **PLOT_CONFIG, height=300,
-                xaxis=dict(tickmode="linear", tick0=0, dtick=4, title="小时"),
-                yaxis=dict(title="季节效应（绝对值）", gridcolor="#f0f0f0"),
-            )
-            st.plotly_chart(fig_day, use_container_width=True)
-            st.markdown("""
-            <div class="insight">
-            📌 <b>双峰通勤：</b>早高峰（8点）和晚高峰（17–18点）季节效应最强，
-            凌晨（1–5点）接近零或为负，与租赁实际规律高度吻合。
-            </div>""", unsafe_allow_html=True)
-
-        # 3. 周内平均季节性
-        with col_w:
-            st.markdown("**📅 周内平均季节效应（7天）**")
-            avg_week_by_day = res["avg_week"].reshape(7, 24).mean(axis=1)
-            day_labels = ["周一","周二","周三","周四","周五","周六","周日"]
-            bar_colors = ["#1E88E5"] * 5 + ["#E53935"] * 2
-            fig_week = go.Figure(go.Bar(
-                x=day_labels, y=avg_week_by_day,
-                marker_color=bar_colors,
-                text=[f"{v:.1f}" for v in avg_week_by_day],
-                textposition="outside",
-            ))
-            fig_week.update_layout(
-                **PLOT_CONFIG, height=300,
-                yaxis=dict(title="季节效应（均值）", gridcolor="#f0f0f0"),
-                xaxis_title="",
-            )
-            st.plotly_chart(fig_week, use_container_width=True)
-            st.markdown("""
-            <div class="insight">
-            📌 <b>工作日 vs 休息日：</b>蓝色=工作日，红色=周末。
-            STL 完整学到了两者的差异——这正是 <code>period=168</code> 相比 <code>period=24</code> 的核心改进。
-            </div>""", unsafe_allow_html=True)
-
-        st.divider()
-
-        # 4. 测试集预测 vs 实际（带时间轴）
-        st.markdown("**🎯 测试集预测 vs 实际值（30天，按时间展示）**")
-        fig_te = go.Figure()
-        fig_te.add_trace(go.Scatter(
-            x=test_ds, y=y_true, name="实际值",
-            line=dict(color="#1E88E5", width=1.5),
-        ))
-        fig_te.add_trace(go.Scatter(
-            x=test_ds, y=y_pred, name="预测值",
-            line=dict(color="#E53935", width=1.5, dash="dot"),
-        ))
-        fig_te.update_layout(
-            **PLOT_CONFIG, height=320, hovermode="x unified",
-            yaxis_gridcolor="#f0f0f0", xaxis_title="日期", yaxis_title="租赁量",
-        )
-        st.plotly_chart(fig_te, use_container_width=True)
 
 
 # ─────────────── 总结页 ────────────────────────────────────
