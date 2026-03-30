@@ -61,6 +61,12 @@ header[data-testid="stHeader"] { display: none; }
     border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 8px 0 16px;
     font-size: 0.9rem; line-height: 1.7; color: #1a237e;
 }
+.textbox {
+    background: #ffffff; border: 1px solid #e2e8f0;
+    border-radius: 8px; padding: 11px 15px; margin: 8px 0 14px;
+    font-size: 0.88rem; line-height: 1.75; color: #374151;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
 .algo-desc {
     background: #fafafa; border: 1px solid #e5e7eb; border-radius: 12px;
     padding: 18px 22px; line-height: 1.8; font-size: 0.92rem; margin-bottom: 18px;
@@ -159,12 +165,13 @@ TEXTS = {
         "zh": "📌 <b>趋势洞察：</b>租赁量整体呈上升趋势，2012年明显高于2011年，说明共享单车平台处于高速增长期。每年呈现明显的<b>季节性波动</b>：夏秋（6–9月）租赁量达到峰值，冬季（12–2月）显著下降，与气温变化高度吻合。",
         "en": "📌 <b>Trend Insight:</b> Rentals show a clear upward trend — 2012 significantly higher than 2011, indicating rapid platform growth. Strong <b>seasonal cycles</b>: peak in summer/autumn (Jun–Sep), sharp decline in winter (Dec–Feb), closely tracking temperature.",
     },
-    "chart_hourly":       {"zh": "🕐 各小时平均租赁量",         "en": "🕐 Average Rentals by Hour"},
+    "chart_hourly":       {"zh": "🌡️ 温度与平均租赁量的关系",    "en": "🌡️ Temperature vs Average Rentals"},
     "label_hour":         {"zh": "小时",                        "en": "Hour"},
     "label_avg_cnt":      {"zh": "平均租赁量",                  "en": "Avg Rentals"},
+    "label_temp":         {"zh": "温度（°C）",                  "en": "Temperature (°C)"},
     "insight_hourly": {
-        "zh": "📌 <b>双峰通勤规律：</b>早高峰（8点）和晚高峰（17–18点）租赁量最高，体现了典型的上下班出行需求。凌晨（1–5点）几乎无人使用。",
-        "en": "📌 <b>Bimodal Commute Pattern:</b> Morning peak (8am) and evening peak (5–6pm) show highest demand — classic commuter behavior. Near-zero usage from 1–5am.",
+        "zh": "租赁量随气温升高而持续增加，在 20–30°C 区间达到峰值（约 250–300 次/时），超过 38°C 后因高温不适开始回落。温度是影响单车需求最直接的连续型特征，在预测模型中权重最高。",
+        "en": "Rentals rise steadily with temperature, peaking in the 20–30°C range (~250–300 rides/hr), then declining above 38°C as heat discourages cycling. Temperature is the strongest continuous predictor in all models.",
     },
     "chart_season":       {"zh": "🌡️ 各季节租赁量分布",        "en": "🌡️ Rental Distribution by Season"},
     "label_season":       {"zh": "季节",                        "en": "Season"},
@@ -173,11 +180,11 @@ TEXTS = {
         "zh": "📌 <b>季节效应：</b>秋季租赁中位数最高，夏季其次。春季偏低（天气不稳定），冬季最低（严寒限制出行）。",
         "en": "📌 <b>Seasonal Effect:</b> Autumn has the highest median rentals, followed by summer. Spring is lower (unstable weather), winter is lowest (cold restricts cycling).",
     },
-    "chart_weather":      {"zh": "☁️ 天气状况对租赁量的影响",   "en": "☁️ Impact of Weather on Rentals"},
+    "chart_weather":      {"zh": "☁️ 天气状况对租赁量分布的影响", "en": "☁️ Rental Distribution by Weather Condition"},
     "label_weather":      {"zh": "天气",                        "en": "Weather"},
     "insight_weather": {
-        "zh": "📌 <b>天气决定性影响：</b>晴天租赁量约是大雨/大雪天气的 <b>10倍</b>。天气是用户出行决策最直接的外部影响因素，在预测模型中权重极高。",
-        "en": "📌 <b>Weather is Decisive:</b> Clear weather generates ~<b>10×</b> more rentals than heavy rain/snow. Weather is the most direct external factor driving rental demand.",
+        "zh": "晴天/少云时租赁量分布最高且最分散（中位数约 180，上四分位可超 400）；雾天中位数约 120；小雨/小雪时显著下降；大雨/大雪时需求几乎归零，分布极度压缩。天气类型是预测模型中最重要的分类型特征。",
+        "en": "Clear/partly cloudy weather shows the highest and most spread distribution (median ~180, upper quartile exceeding 400). Mist drops to ~120 median; light rain/snow shows a sharp decline; heavy rain/snow nearly eliminates demand. Weather category is the most important categorical feature in all models.",
     },
     "chart_workday":      {"zh": "📅 工作日 vs 休息日（按小时）", "en": "📅 Workday vs Weekend (by Hour)"},
     "label_day_type":     {"zh": "",                             "en": ""},
@@ -277,6 +284,8 @@ WEATHER_MAP_EN = {1: "Clear/Partly Cloudy", 2: "Mist/Cloudy", 3: "Light Rain/Sno
 
 SEASON_ORDER_ZH  = ["春季", "夏季", "秋季", "冬季"]
 SEASON_ORDER_EN  = ["Spring", "Summer", "Autumn", "Winter"]
+WEATHER_ORDER_ZH = ["晴天/少云", "雾天/多云", "小雨/小雪", "大雨/大雪"]
+WEATHER_ORDER_EN = ["Clear/Partly Cloudy", "Mist/Cloudy", "Light Rain/Snow", "Heavy Rain/Snow"]
 
 MODEL_KEYS   = ["线性回归", "岭回归", "随机森林", "梯度提升", "XGBoost"]
 MODEL_NAMES_EN = {
@@ -644,7 +653,8 @@ def page_dashboard():
     lang = st.session_state.lang
     season_map  = SEASON_MAP_EN  if lang == "en" else SEASON_MAP_ZH
     weather_map = WEATHER_MAP_EN if lang == "en" else WEATHER_MAP_ZH
-    season_order = SEASON_ORDER_EN if lang == "en" else SEASON_ORDER_ZH
+    season_order  = SEASON_ORDER_EN  if lang == "en" else SEASON_ORDER_ZH
+    weather_order = WEATHER_ORDER_EN if lang == "en" else WEATHER_ORDER_ZH
     df["season_label"]  = df["season"].map(season_map)
     df["weather_label"] = df["weathersit"].map(weather_map)
 
@@ -680,23 +690,31 @@ def page_dashboard():
     fig1.update_layout(**PLOT_CONFIG, height=300, hovermode="x unified",
                        xaxis_title="", yaxis_gridcolor="#f0f0f0", xaxis_showgrid=False)
     st.plotly_chart(fig1, use_container_width=True)
-    st.markdown(f'<div class="insight">{t("insight_daily")}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="textbox">{t("insight_daily")}</div>', unsafe_allow_html=True)
     st.divider()
 
-    # 2. 小时分布 & 季节分布
+    # 2. 温度折线图 & 季节箱型图
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader(t("chart_hourly"))
-        hourly = df.groupby("hr")["cnt"].mean().reset_index()
-        fig2 = px.bar(
-            hourly, x="hr", y="cnt",
-            labels={"hr": t("label_hour"), "cnt": t("label_avg_cnt")},
-            color="cnt", color_continuous_scale="Blues",
+        temp_df = df.copy()
+        temp_df["temp_c"] = (temp_df["temp"] * 41).round(0).astype(int)
+        temp_avg = temp_df.groupby("temp_c")["cnt"].mean().reset_index()
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x=temp_avg["temp_c"], y=temp_avg["cnt"],
+            mode="lines+markers",
+            line=dict(color="#FF7043", width=2.5),
+            marker=dict(size=5, color="#FF7043"),
+            fill="tozeroy", fillcolor="rgba(255,112,67,0.08)",
+        ))
+        fig2.update_layout(
+            **PLOT_CONFIG, height=300, hovermode="x unified",
+            xaxis_title=t("label_temp"), yaxis_title=t("label_avg_cnt"),
+            yaxis_gridcolor="#f0f0f0", xaxis_showgrid=False,
         )
-        fig2.update_layout(**PLOT_CONFIG, height=300, showlegend=False,
-                           coloraxis_showscale=False, yaxis_gridcolor="#f0f0f0")
         st.plotly_chart(fig2, use_container_width=True)
-        st.markdown(f'<div class="insight">{t("insight_hourly")}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="textbox">{t("insight_hourly")}</div>', unsafe_allow_html=True)
 
     with col_b:
         st.subheader(t("chart_season"))
@@ -710,27 +728,25 @@ def page_dashboard():
         fig3.update_layout(**PLOT_CONFIG, height=300, showlegend=False,
                            yaxis_gridcolor="#f0f0f0")
         st.plotly_chart(fig3, use_container_width=True)
-        st.markdown(f'<div class="insight">{t("insight_season")}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="textbox">{t("insight_season")}</div>', unsafe_allow_html=True)
 
     st.divider()
 
-    # 3. 天气 & 工作日
+    # 3. 天气箱型图 & 工作日折线图
     col_c, col_d = st.columns(2)
     with col_c:
         st.subheader(t("chart_weather"))
-        weather_avg = (
-            df.groupby("weather_label")["cnt"].mean()
-            .reset_index().sort_values("cnt", ascending=False)
-        )
-        fig4 = px.bar(
-            weather_avg, x="weather_label", y="cnt",
-            labels={"weather_label": t("label_weather"), "cnt": t("label_avg_cnt")},
-            color="cnt", color_continuous_scale="RdYlGn",
+        fig4 = px.box(
+            df, x="weather_label", y="cnt",
+            labels={"weather_label": t("label_weather"), "cnt": t("label_cnt")},
+            category_orders={"weather_label": weather_order},
+            color="weather_label",
+            color_discrete_sequence=["#42A5F5", "#AB47BC", "#EF5350", "#78909C"],
         )
         fig4.update_layout(**PLOT_CONFIG, height=300, showlegend=False,
-                           coloraxis_showscale=False, yaxis_gridcolor="#f0f0f0")
+                           yaxis_gridcolor="#f0f0f0")
         st.plotly_chart(fig4, use_container_width=True)
-        st.markdown(f'<div class="insight">{t("insight_weather")}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="textbox">{t("insight_weather")}</div>', unsafe_allow_html=True)
 
     with col_d:
         st.subheader(t("chart_workday"))
@@ -744,7 +760,7 @@ def page_dashboard():
         fig5.update_layout(**PLOT_CONFIG, height=300, hovermode="x unified",
                            yaxis_gridcolor="#f0f0f0")
         st.plotly_chart(fig5, use_container_width=True)
-        st.markdown(f'<div class="insight">{t("insight_workday")}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="textbox">{t("insight_workday")}</div>', unsafe_allow_html=True)
 
     st.divider()
 
@@ -760,7 +776,7 @@ def page_dashboard():
     ))
     fig6.update_layout(**PLOT_CONFIG, height=400)
     st.plotly_chart(fig6, use_container_width=True)
-    st.markdown(f'<div class="insight">{t("insight_heatmap")}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="textbox">{t("insight_heatmap")}</div>', unsafe_allow_html=True)
 
     # 5. 原始数据预览
     with st.expander(t("raw_data_expander")):
